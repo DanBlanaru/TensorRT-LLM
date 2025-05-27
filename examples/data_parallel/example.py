@@ -5,6 +5,8 @@ import os
 import time
 from pathlib import Path
 
+import click
+
 logger = logging.getLogger("Main process")
 
 
@@ -233,11 +235,17 @@ def batch_worker(
     worker_logger.info(f'Exiting')
 
 
-def main(n_workers=1,
-         engine_path="./tmp/meta-llama/Llama-3.1-8B/tp_1_pp_1/",
-         trtllm_config=None,
-         n_gpus=1,
-         request_path="./tmp/synthetic_2048_128.txt"):
+@click.command()
+@click.option('--n_workers', type=int, default=2)
+@click.option('--engine_path',
+              type=str,
+              default="./tmp/meta-llama/Llama-3.1-8B/tp_1_pp_1/")
+@click.option('--trtllm_config', type=str, default=None)
+@click.option('--n_gpus', type=int, default=1)
+@click.option('--request_path',
+              type=str,
+              default="./tmp/synthetic_2048_128.txt")
+def main(n_workers, engine_path, trtllm_config, n_gpus, request_path):
     with open(request_path, "r") as f:
         request_list = [json.loads(line.strip()) for line in f.readlines()]
 
