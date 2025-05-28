@@ -25,11 +25,7 @@ def create_executor(engine_dir, trtllm_config=None, gpu_ids=None):
     trtllm_config = trtllm.ExecutorConfig(
         1,
         enable_chunked_context=True,
-        # kv_cache_config=kv_cache_config,
-        # parallel_config=parallel_config,
-        # scheduler_config=scheduler_config,
     )
-
     executor = trtllm.Executor(Path(engine_dir), trtllm.ModelType.DECODER_ONLY,
                                trtllm_config)
     return executor
@@ -114,38 +110,6 @@ def batch(request_list: list[tuple[list[int], int]],
     return [elem[0] for elem in sorted_recv]
 
 
-def create_tllm_request(*, token_ids, params, tokenizer, streaming,
-                        return_all_generated_tokens):
-    global llm_api, trtllm, SamplingParams
-    llm_api_sampling_params = SamplingParams(temperature=1,
-                                             max_tokens=params,
-                                             exclude_input_from_output=True)
-    llm_api_sampling_params._setup(tokenizer)
-
-    request_obj = llm_api.GenerationRequest(
-        prompt_token_ids=token_ids,
-        sampling_params=llm_api_sampling_params,
-        lora_request=None,
-        streaming=streaming)
-
-    executor_request = trtllm.Request(
-        input_token_ids=request_obj.prompt_token_ids,
-        max_tokens=request_obj.sampling_params.max_tokens,
-        streaming=request_obj.streaming,
-        sampling_config=request_obj.sampling_params._get_sampling_config(),
-        end_id=request_obj.sampling_params.end_id,
-        pad_id=request_obj.sampling_params.pad_id,
-        output_config=request_obj.sampling_params._get_output_config(),
-        bad_words=request_obj.sampling_params._get_bad_words(),
-        stop_words=request_obj.sampling_params._get_stop_words(),
-        embedding_bias=request_obj.sampling_params.embedding_bias,
-        lora_config=None,
-        return_all_generated_tokens=return_all_generated_tokens,
-    )
-
-    return executor_request
-
-
 def batch_worker(
     wid,
     modelPath,
@@ -156,6 +120,7 @@ def batch_worker(
 ):
 
     worker_logger = logging.getLogger(f'bWorker {wid:3d}:')
+    worker_logger.setLevel(logging.INFO)
     worker_logger.warning(f"{wid} printing here")
 
     gpu_indices = list(range(wid * n_gpus, wid * n_gpus + n_gpus))
@@ -168,15 +133,12 @@ def batch_worker(
         f'PID = {os.getpid()}, host={"localhost"}, port={8081}, model_path={modelPath}'
     )
 
-    print("child process is at first barrier", flush=True)
+    worker_logger.info("child process is at first barrier", flush=True)
     barrier.wait()
 
-    # ================================================================================================================
+    # import objects that need a cuda context inside the function to avoid cuda+multiprocessing issues
     from transformers import AutoTokenizer
-    global llm_api, trtllm, SamplingParams
 
-    import tensorrt_llm.executor as llm_api
-    from tensorrt_llm import SamplingParams
     from tensorrt_llm.bindings import executor as trtllm
 
     worker_logger.info("Loading model...")
@@ -196,23 +158,21 @@ def batch_worker(
         for resp_pair in resp_token_idx_pairs:
             resultQueue.put(resp_pair)
 
-    # ================================================================================================================
-    print("child process is at second barrier ", flush=True)
-    barrier.wait()  # Wait for LLM creation (to get accurate tput.)
+    worker_logger.info("child process is at second barrier ", flush=True)
+    barrier.wait()  # Wait for all LLMs to be created (to get accurate tput.)
 
     sample = 0
     tllm_id_to_queue_id = dict()
     while True:
-        inp_tokens, params, rid = supplier_queue.get()
+        inp_tokens, max_tokens, rid = supplier_queue.get()
         if inp_tokens is None:
             break
 
-        executor_request = create_tllm_request(
-            token_ids=inp_tokens,
-            params=params,
-            tokenizer=tokenizer,
-            streaming=False,
-            return_all_generated_tokens=False,
+        executor_request = trtllm.Request(
+            input_token_ids=inp_tokens,
+            max_tokens=max_tokens,
+            end_id=tokenizer.eos_token_id,
+            pad_id=tokenizer.pad_token_id,
         )
 
         # API call here
@@ -222,15 +182,13 @@ def batch_worker(
 
         if tmp_req_id % 100 == 0:
             collect_responses()
-        print(f"worker {wid} has enqueued {tmp_req_id} requests", flush=True)
+            worker_logger.info(
+                f"worker {wid} has enqueued {tmp_req_id} requests")
 
     worker_logger.info(f'Just waiting for results')
 
     while len(tllm_id_to_queue_id) > 0:
         collect_responses()
-
-    # stats = holder.executor.get_latest_iteration_stats()
-    # create_usage_graphs(stats, holder=holder)
 
     worker_logger.info(f'Exiting')
 
